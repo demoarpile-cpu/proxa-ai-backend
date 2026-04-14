@@ -2,8 +2,6 @@ require('dotenv').config();
 const cron = require('node-cron');
 const { Op } = require('sequelize');
 const db = require("../../config/config");
-const contract = db.contract;
-const renewal_notification = db.renewal_notification;
 const { sendEmail } = require('../utils/mailService');
 const recipientEmail = process.env.RECIPIENT_EMAIL;
 
@@ -11,61 +9,74 @@ const sendRenewalNotifications = async () => {
     try {
         console.log('Running automated renewal notification job...');
 
-        const targetDays = [30, 60, 90];
         const today = new Date();
         today.setHours(0, 0, 0, 0);
 
-        for (const days of targetDays) {
-            const targetDate = new Date(today);
-            targetDate.setDate(today.getDate() + days);
-            
-            // Define a range for the target date to avoid missed notifications
-            const nextDay = new Date(targetDate);
-            nextDay.setDate(targetDate.getDate() + 1);
+        // Fetch all customized notification preferences
+        const preferences = await db.contract_preference.findAll({
+            where: { status: true },
+            include: [{
+                model: db.intake_request,
+                as: 'intakeDetails',
+                attributes: ['id', 'supplierName', 'endDate']
+            }]
+        });
 
-            const contracts = await contract.findAll({
-                where: {
-                    status: 'Active',
-                    endDate: {
-                        [Op.gte]: targetDate,
-                        [Op.lt]: nextDay
-                    }
-                },
-                include: [
-                    {
-                        model: db.supplier,
-                        as: 'supplier',
-                        attributes: ['name']
-                    }
-                ]
-            });
+        for (const pref of preferences) {
+            const contract = pref.intakeDetails;
+            if (!contract || !contract.endDate) continue;
 
-            for (const c of contracts) {
-                const supplierName = c.supplier?.name || "N/A";
-                const intakeNumber = c.intakeRequestId || c.id;
-                const expiryDate = c.endDate.toISOString().split('T')[0];
+            const expiryDate = new Date(contract.endDate);
+            expiryDate.setHours(0, 0, 0, 0);
 
-                const emailSubject = `Renewal Alert: ${days} Days Remaining for ${supplierName}`;
-                const emailBody = `
-Automated Renewal Notification
+            // Calculate diff in days
+            const diffTime = expiryDate.getTime() - today.getTime();
+            const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-This is to inform you that the contract for Supplier: ${supplierName} (Intake/Contract ID: ${intakeNumber}) is set to expire on ${expiryDate}.
+            const reminderSchedule = typeof pref.reminderDays === 'string' 
+                ? JSON.parse(pref.reminderDays) 
+                : pref.reminderDays;
 
-Please take the necessary actions for renewal or termination.
+            const alreadyNotified = typeof pref.lastNotifiedDays === 'string'
+                ? JSON.parse(pref.lastNotifiedDays || '[]')
+                : (pref.lastNotifiedDays || []);
 
-Regards,
-ProX AI System
-                `;
+            // Check if today matches any scheduled reminder day
+            if (reminderSchedule.includes(diffDays) && !alreadyNotified.includes(diffDays)) {
+                
+                const supplierName = contract.supplierName || "N/A";
+                const intakeID = contract.id;
+                const formattedExpiry = expiryDate.toISOString().split('T')[0];
+                const recipients = pref.emailRecipients || recipientEmail;
 
-                // Send email to a configured recipient or department email
-                // Requirement: Dynamic email template will be provided later. 
-                // For now, using a standardized text-based format.
-                const success = await sendEmail(recipientEmail, emailSubject, emailBody);
+                // Use custom subject if available, otherwise use default
+                let emailSubject = pref.emailSubject || `Renewal Alert: ${diffDays} Days Remaining for ${supplierName}`;
+                
+                // Use custom body if available, otherwise use default
+                let body = pref.emailBody || "Renewal Alert: The contract for {{Supplier}} is expiring on {{ExpiryDate}}. Action required within {{Days}} days.";
+
+                // Dynamic variable replacement for subject and body
+                const replacements = {
+                    "{{Supplier}}": supplierName,
+                    "{{ExpiryDate}}": formattedExpiry,
+                    "{{IntakeID}}": intakeID,
+                    "{{Days}}": diffDays
+                };
+
+                Object.keys(replacements).forEach(key => {
+                    const regex = new RegExp(key, "g");
+                    emailSubject = emailSubject.replace(regex, replacements[key]);
+                    body = body.replace(regex, replacements[key]);
+                });
+
+                const success = await sendEmail(recipients, emailSubject, body);
 
                 if (success) {
-                    console.log(`Email sent for contract ${c.id} (${days} days before expiry)`);
-                } else {
-                    console.error(`Failed to send email for contract ${c.id}`);
+                    console.log(`Email sent for contract ${contract.id} (${diffDays} days before expiry) to ${recipients}`);
+                    
+                    // Track that we notified for this day to avoid duplicate sends
+                    const updatedNotified = [...alreadyNotified, diffDays];
+                    await pref.update({ lastNotifiedDays: updatedNotified });
                 }
             }
         }
@@ -77,7 +88,7 @@ ProX AI System
 // Schedule the cron job to run daily at 9:00 AM
 cron.schedule('0 9 * * *', () => {
     sendRenewalNotifications();
-    console.log('Cron job executed successfully at 9:00 AM.');
+    console.log('Cron job task executed.');
 });
 
 module.exports = { sendRenewalNotifications };

@@ -24,6 +24,14 @@ module.exports = (sequelize, DataTypes) => {
     status: {
       type: DataTypes.BOOLEAN,
       defaultValue: true
+    },
+    emailBody: {
+      type: DataTypes.TEXT,
+      allowNull: true
+    },
+    emailSubject: {
+      type: DataTypes.STRING,
+      allowNull: true
     }
   }, {
     tableName: 'contract_preferences',

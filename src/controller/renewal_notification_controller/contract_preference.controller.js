@@ -10,7 +10,7 @@ exports.getContractsForNotification = async (req, res) => {
     const contracts = await IntakeRequest.findAll({
       // We only want approved or active requests that have an end date
       where: {
-        status: { [Op.in]: ['approved', 'active'] },
+        status: 'approved',
         endDate: { [Op.ne]: null }
       },
       include: [
@@ -37,7 +37,7 @@ exports.getContractsForNotification = async (req, res) => {
 // 2. Save or Update Notification Preference
 exports.saveContractPreference = async (req, res) => {
   try {
-    const { intakeRequestId, emailRecipients, reminderDays } = req.body;
+    const { intakeRequestId, emailRecipients, reminderDays, emailBody, emailSubject } = req.body;
 
     if (!intakeRequestId || !emailRecipients || !reminderDays) {
       return res.status(400).json({ status: false, message: "Missing required fields." });
@@ -50,7 +50,9 @@ exports.saveContractPreference = async (req, res) => {
       // Update existing
       await preference.update({
         emailRecipients,
-        reminderDays
+        reminderDays,
+        emailBody,
+        emailSubject
       });
       return res.status(200).json({ status: true, message: "Preferences updated successfully.", data: preference });
     } else {
@@ -58,7 +60,9 @@ exports.saveContractPreference = async (req, res) => {
       preference = await ContractPreference.create({
         intakeRequestId,
         emailRecipients,
-        reminderDays
+        reminderDays,
+        emailBody,
+        emailSubject
       });
       return res.status(201).json({ status: true, message: "Preferences saved successfully.", data: preference });
     }
