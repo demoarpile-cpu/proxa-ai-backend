@@ -1,26 +1,12 @@
 const { Op, Sequelize } = require("sequelize");
 const db = require("../../../config/config");
-
-// Core Models
-const Transaction = db.transaction;
-const Contract = db.contract;
-const Supplier = db.supplier;
-const SupplierRating = db.supplier_rating;
-
-// Expanded Modules Models
-const IntakeRequest = db.intake_request;
-const Department = db.department;
-const License = db.license;
-const ClientLicense = db.client_license;
-const Inventory = db.inventory;
-const CostSaving = db.costSaving;
-const VolumeDiscount = db.volume_discount;
-const RenewalNotification = db.renewal_notification;
-const ContractTemplate = db.contract_template;
-const MultiYearContracting = db.multi_year_contracting;
-
+const { getProjectSnapshot } = require("../../utils/stats_utility");
 const moment = require("moment");
 
+/**
+ * Advanced Chatbot Handler using Regex-based intent parsing
+ * and a comprehensive project data snapshot.
+ */
 const chatHandler = async (req, res) => {
     try {
         const { human_message } = req.body;
@@ -28,164 +14,125 @@ const chatHandler = async (req, res) => {
         const userId = req.user?.id;
         const isSuperAdmin = userType === 'superadmin';
 
-        // Role-based filtering (where applicable)
-        // accessible to user or company-wide depending on model strictness
-        const whereClause = isSuperAdmin ? {} : { userId };
-        const isGreeting = human_message.toLowerCase().match(/^(hi|hello|hey|greetings)/);
-
         if (!human_message) {
             return res.status(400).json({ status: false, message: "Message is required" });
         }
 
         const lowerMessage = human_message.toLowerCase();
-        let responseText = "I can help you with Spend, Contracts, Intake, Inventory, Licenses, and more. Try asking specifically about any module!";
+        const whereClause = isSuperAdmin ? {} : { userId };
 
-        if (isGreeting) {
-            return res.status(200).json({
-                status: true,
-                response: `Hello! I am your ProcXa Assistant. I can analyze data across all your modules. Ask me about "Total Spend", "Open Intake Requests", "Inventory Stock", or "Expiring Licenses".`
-            });
+        // 1. Fetch current project snapshot
+        const snapshot = await getProjectSnapshot(whereClause);
+        if (!snapshot) {
+            return res.status(500).json({ status: false, message: "Failed to gather database statistics." });
         }
 
-        // =====================================================
-        // 1. SPEND ANALYTICS (spend, transaction, amount)
-        // =====================================================
-        if (lowerMessage.includes("spend") || lowerMessage.includes("transaction") || lowerMessage.includes("amount")) {
-            const totalSpend = await Transaction.sum('amount', { where: whereClause });
-            const transactionCount = await Transaction.count({ where: whereClause });
-            const formattedSpend = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(totalSpend || 0);
-            responseText = `Total spend is ${formattedSpend} across ${transactionCount} transactions.`;
-            if (isSuperAdmin) responseText += " (Company-wide)";
-        }
+        let responseText = "";
 
         // =====================================================
-        // 2. CONTRACT MANAGEMENT (contract, agreement, expiry)
+        // INTENT DETECTION LOGIC (Regex Patterns)
         // =====================================================
-        else if (lowerMessage.includes("contract") || lowerMessage.includes("agreement")) {
-            const activeContracts = await Contract.count({ where: { ...whereClause, status: 'Active' } });
-            const totalContracts = await Contract.count({ where: whereClause });
-            const expiringSoon = await Contract.findAll({
-                where: { ...whereClause, endDate: { [Op.between]: [moment().toDate(), moment().add(30, 'days').toDate()] } },
-                limit: 3, attributes: ['contractName', 'endDate']
-            });
-            responseText = `You have ${activeContracts} active contracts out of ${totalContracts} total.`;
-            if (expiringSoon.length > 0) {
-                const expiringNames = expiringSoon.map(c => `${c.contractName} (${moment(c.endDate).format('MMM D')})`).join(", ");
-                responseText += ` Warning: Expiring soon: ${expiringNames}.`;
-            }
+
+        // GREETINGS
+        if (lowerMessage.match(/^(hi|hello|hey|greetings|sasriyakaal|namaste)/i)) {
+            responseText = `Hello! I am your ProcXa AI Assistant. I have analyzed all your modules. 
+            \nAap mujhse kisi bhi menu item ke baare mein puch sakte hain (Intake, Contracts, Spend, Suppliers, etc.).
+            \nTry asking: "Project status batao" ya "Kitne approval pending hain?".`;
         }
 
-        // =====================================================
-        // 3. RENEWAL MANAGEMENT (renewal, expiring, reminder)
-        // =====================================================
-        else if (lowerMessage.includes("renewal")) {
-            const pendingRenewals = await Contract.findAll({
-                where: { ...whereClause, endDate: { [Op.between]: [moment().toDate(), moment().add(90, 'days').toDate()] } },
-                limit: 5, attributes: ['contractName', 'endDate']
-            });
-            if (pendingRenewals.length > 0) {
-                const renewalList = pendingRenewals.map(c => `- ${c.contractName} (Due: ${moment(c.endDate).format('MMM D')})`).join("\n");
-                responseText = `Upcoming renewals (next 90 days):\n${renewalList}`;
+        // 1. INTAKE MANAGEMENT
+        else if (lowerMessage.match(/(intake|request|requisition)/i)) {
+            if (lowerMessage.match(/(approved|pass|clear)/i)) {
+                responseText = `Aapke paas total **${snapshot.intake.approved} approved** intake requests hain.`;
+            } else if (lowerMessage.match(/(pending|wait|open)/i)) {
+                responseText = `Abhi **${snapshot.intake.pending} requests pending** hain approval ke liye.`;
+            } else if (lowerMessage.match(/(rejected|cancel)/i)) {
+                responseText = `System mein **${snapshot.intake.rejected} rejected** requests hain.`;
             } else {
-                responseText = "No immediate renewals pending for the next 90 days.";
+                responseText = `Intake Status: Total **${snapshot.intake.total}** requests hain. 
+                \n- Pending: ${snapshot.intake.pending}
+                \n- Approved: ${snapshot.intake.approved}
+                \n- Active: ${snapshot.intake.active}`;
             }
         }
 
-        // =====================================================
-        // 4. SUPPLIER PERFORMANCE (supplier, vendor, kpi)
-        // =====================================================
-        else if (lowerMessage.includes("supplier") || lowerMessage.includes("vendor") || lowerMessage.includes("kpi")) {
-            const topSuppliers = await SupplierRating.findAll({
-                where: whereClause,
-                include: [{ model: Supplier, as: 'supplier', attributes: ['name'] }],
-                order: [['averageRating', 'DESC']],
-                limit: 3
-            });
-            const totalSuppliers = await Supplier.count({ where: whereClause });
-
-            if (topSuppliers.length > 0) {
-                const supplierList = topSuppliers.map(s => `${s.supplier?.name} (${s.averageRating})`).join(", ");
-                responseText = `You have ${totalSuppliers} vendors. Top rated: ${supplierList}.`;
+        // 2. CONTRACT MANAGEMENT & RENEWAL MANAGEMENT
+        else if (lowerMessage.match(/(contract|agreement|renewal|renew)/i)) {
+            if (lowerMessage.match(/(expir|end|finish|khata?m)/i)) {
+                responseText = `Warning: Aapke **${snapshot.contracts.expiringSoon} contracts** agle 30 dino mein expire hone wale hain. 
+                \nRenewal table mein **${snapshot.renewals.total}** records managed hain.`;
+            } else if (lowerMessage.match(/(active|chalu)/i)) {
+                responseText = `Aapke paas total **${snapshot.contracts.active} active contracts** hain.`;
             } else {
-                responseText = `You have ${totalSuppliers} registered suppliers. No ratings found yet.`;
+                responseText = `Contract & Renewal Detail:
+                \n- Total Contracts: ${snapshot.contracts.total}
+                \n- Active: ${snapshot.contracts.active}
+                \n- Renewals Tracked: ${snapshot.renewals.total}`;
             }
         }
 
-        // =====================================================
-        // 5. INTAKE MANAGEMENT (intake, request, requisition)
-        // =====================================================
-        else if (lowerMessage.includes("intake") || lowerMessage.includes("request") || lowerMessage.includes("requisition")) {
-            const pendingIntake = await IntakeRequest.count({ where: { ...whereClause, status: 'pending' } }); // Adjust status value as per DB
-            const totalIntake = await IntakeRequest.count({ where: whereClause });
-            responseText = `There are ${totalIntake} total intake requests. ${pendingIntake} are currently pending approval.`;
+        // 3. APPROVAL WORKFLOW
+        else if (lowerMessage.match(/(approval|workflow|approver)/i)) {
+            responseText = `Approval Workflow Status:
+            \nAbhi total **${snapshot.approvals.pending} approval requests pending** hain jo aapke review ka intezaar kar rahe hain.`;
         }
 
-        // =====================================================
-        // 6. DEPARTMENT MANAGEMENT (department, dept)
-        // =====================================================
-        else if (lowerMessage.includes("department") || lowerMessage.includes("dept")) {
-            // Departments might be company wide usually, but let's check
-            // Check if Department model has userId or is generic. Usually generic or by organizationId.
-            // Assuming filtered by whereClause if applicable, or just all if generic.
-            // For safety, let's try generic count first if whereClause might fail, but config implies it's a standard model.
-            // We'll use whereClause if not superadmin generally implies logic.
-            // Let's assume departments are User specific OR SuperAdmin managed.
-            const totalDepts = await Department.count({ where: whereClause });
-            responseText = `You have ${totalDepts} departments configured in the system.`;
+        // 4. COST SAVING OPPORTUNITIES
+        else if (lowerMessage.match(/(saving|discount|fayda|cost)/i)) {
+            const formattedSavings = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(snapshot.savings.total);
+            responseText = `Cost Saving Status: Aapne total **${formattedSavings}** ki potential savings identify ki hain.`;
         }
 
-        // =====================================================
-        // 7. LICENSE MANAGEMENT (license, subscription, seat)
-        // =====================================================
-        else if (lowerMessage.includes("license") || lowerMessage.includes("subscription")) {
-            const totalLicenses = await License.count({ where: whereClause });
-            const clientLicenses = await ClientLicense.count({ where: whereClause });
-            responseText = `License Overview: ${totalLicenses} internal licenses and ${clientLicenses} third-party/client licenses managed.`;
+        // 5. SUPPLIER PERFORMANCE
+        else if (lowerMessage.match(/(supplier|vendor|performance|rating)/i)) {
+            responseText = `Supplier Overview: Aapke system mein total **${snapshot.suppliers.total} registered suppliers** hain. Aap unki performance details 'Supplier Performance' menu mein dekh sakte hain.`;
         }
 
-        // =====================================================
-        // 8. INVENTORY MANAGEMENT (inventory, stock, item)
-        // =====================================================
-        else if (lowerMessage.includes("inventory") || lowerMessage.includes("stock") || lowerMessage.includes("item")) {
-            const totalInventory = await Inventory.count({ where: whereClause });
-            const lowStock = await Inventory.count({ where: { ...whereClause, quantity: { [Op.lt]: 10 } } }); // Example threshold
-            responseText = `Inventory Status: ${totalInventory} items in stock. ${lowStock} items are low on stock (<10).`;
+        // 6. SPEND ANALYTICS
+        else if (lowerMessage.match(/(spend|transaction|amount|kharcha|paisa)/i)) {
+            const formattedSpend = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(snapshot.spend.total);
+            responseText = `Spend Analytics: Aapka total spend **${formattedSpend}** hua hai across **${snapshot.spend.transactions} transactions**.`;
         }
 
-        // =====================================================
-        // 9. COST SAVING OPPORTUNITIES (saving, discount)
-        // =====================================================
-        else if (lowerMessage.includes("saving") || lowerMessage.includes("discount") || lowerMessage.includes("cost")) {
-            const totalSavings = await CostSaving.sum('estimatedSavings', { where: whereClause }) || 0;
-            const activeDiscounts = await VolumeDiscount.count({ where: whereClause });
-            const formattedSavings = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(totalSavings);
-            responseText = `You have identified ${formattedSavings} in potential cost savings. There are ${activeDiscounts} active volume discount opportunities.`;
+        // 7. LICENSE OVERVIEW & THIRD-PARTY LICENSES
+        else if (lowerMessage.match(/(license|subscription|key|third party)/i)) {
+            responseText = `License Management:
+            \n- Internal Licenses: ${snapshot.licenses.total}
+            \n- Third-Party/Client Licenses: ${snapshot.licenses.thirdParty}`;
         }
 
-        // =====================================================
-        // 10. RENEWAL NOTIFICATIONS (notification, alert)
-        // =====================================================
-        else if (lowerMessage.includes("notification") || lowerMessage.includes("alert")) {
-            const activeNotifications = await RenewalNotification.count({ where: whereClause });
-            responseText = `You have ${activeNotifications} active renewal notifications configured.`;
+        // 8. INVENTORY
+        else if (lowerMessage.match(/(inventory|stock|item|maal)/i)) {
+            responseText = `Inventory Status: Total **${snapshot.inventory.total}** items hain. jinmein se **${snapshot.inventory.lowStock} items low stock** par hain.`;
         }
 
-        // =====================================================
-        // 11. CONTRACT TEMPLATES (template, draft)
-        // =====================================================
-        else if (lowerMessage.includes("template") || lowerMessage.includes("draft")) {
-            const totalTemplates = await ContractTemplate.count({ where: whereClause });
-            responseText = `There are ${totalTemplates} contract templates available for use.`;
+        // 9. CONTRACT TEMPLATES
+        else if (lowerMessage.match(/(template|draft)/i)) {
+            responseText = `Templates: Aapke paas total **${snapshot.templates.total} contract templates** available hain naye contracts banane ke liye.`;
         }
 
-        // =====================================================
-        // 12. MULTI-YEAR CONTRACTS (multi-year, long term)
-        // =====================================================
-        else if (lowerMessage.includes("multi") || lowerMessage.includes("year")) {
-            const totalMultiYear = await MultiYearContracting.count({ where: whereClause });
-            responseText = `You have ${totalMultiYear} multi-year contracting records.`;
+        // 10. DEPARTMENT MANAGEMENT
+        else if (lowerMessage.match(/(department|dept|team)/i)) {
+            responseText = `Departments: System mein total **${snapshot.departments.total} departments** configured hain.`;
         }
 
+        // 11. GENERAL SUMMARY / "PROJECT KAISE CHAL RAHA HAI" / DASHBOARD
+        else if (lowerMessage.match(/(summary|status|report|analytics|dashboard|kya chal raha hai)/i)) {
+            responseText = `Yahan aapke poore project ka complete snapshot hai:
+            \n📋 **Intake**: ${snapshot.intake.total} Requests (${snapshot.intake.pending} Pending)
+            \n📜 **Contracts**: ${snapshot.contracts.total} Total (${snapshot.contracts.active} Active)
+            \n⚖️ **Approvals**: ${snapshot.approvals.pending} Pending
+            \n💰 **Spend**: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(snapshot.spend.total)}
+            \n💸 **Savings**: ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(snapshot.savings.total)}
+            \n🏭 **Suppliers**: ${snapshot.suppliers.total} Vendors
+            \n🔑 **Licenses**: ${snapshot.licenses.total + snapshot.licenses.thirdParty} Total
+            \n📦 **Inventory**: ${snapshot.inventory.total} items`;
+        }
+
+        // FALLBACK
+        else {
+            responseText = `Main har menu ka data bata sakta hoon. Aap kisi specific cheez ke baare mein puchiye, jaise "Active Contracts kitne hain?" ya "Inventory status batao".`;
+        }
 
         // Return the response
         return res.status(200).json({
