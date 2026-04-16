@@ -5,7 +5,8 @@
   "main": "procurement_server.js",
   "scripts": {
     "start": "node procurement_server.js",
-    "dev": "nodemon procurement_server.js"
+    "dev": "nodemon procurement_server.js",
+    "fix-db": "node create_table_fix.js"
   },
   "keywords": [],
   "author": "",

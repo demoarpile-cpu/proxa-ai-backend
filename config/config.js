@@ -98,7 +98,16 @@ require('./association')(db);
 
 // Always sync the database schema in both Local and Production
 // { alter: false } ensures tables are created if missing, but doesn't force schema changes that could lose data
-db.sequelize.sync({ alter: false });
+(async () => {
+    try {
+        await db.sequelize.sync({ alter: false });
+        console.log('✅ Database schema synchronized successfully');
+    } catch (err) {
+        console.error('❌ Database synchronization failed:', err.message);
+        // Log more details if available
+        if (err.parent) console.error('Parent Error:', err.parent.message);
+    }
+})();
 
 
 module.exports = db;
